@@ -2,15 +2,41 @@ import requests
 from urllib.parse import urljoin
 from moviepy.editor import VideoFileClip
 import os
+from tqdm import tqdm
 
 class M3U8Downloader:
-    def __init__(self, url):
+    """
+    A class to download and convert video from a given M3U8 URL.
+
+    Attributes:
+        url (str): The URL of the M3U8 playlist.
+        m3u8_content (str): The content of the M3U8 file.
+        media_urls (dict): A dictionary mapping resolution names to media URLs.
+        output_mp4 (str): The name of the output MP4 file.
+    """
+
+    def __init__(self, url, output_mp4="output.mp4"):
+        """
+        Initializes the M3U8Downloader with the provided URL and starts the download process.
+
+        Parameters:
+            url (str): The URL of the M3U8 playlist.
+            output_mp4 (str): The name of the output MP4 file.
+        """
         self.url = url
         self.m3u8_content = None
         self.media_urls = {}
-    
+        self.output_mp4 = output_mp4
+
+        # Start the process immediately upon initialization
+        self.download_m3u8()
+        self.parse_m3u8()
+        self.ask_resolution_and_download()
+
     def download_m3u8(self):
-        # Download the .m3u8 file
+        """
+        Downloads the M3U8 file from the given URL.
+        """
         response = requests.get(self.url)
         if response.status_code == 200:
             self.m3u8_content = response.text
@@ -19,7 +45,9 @@ class M3U8Downloader:
             raise Exception(f"Failed to download .m3u8 file. Status code: {response.status_code}")
 
     def parse_m3u8(self):
-        # Parse the .m3u8 file content
+        """
+        Parses the M3U8 file content to extract media URLs and resolutions.
+        """
         lines = self.m3u8_content.splitlines()
         for line in lines:
             if line.startswith('https://'):
@@ -29,14 +57,24 @@ class M3U8Downloader:
                 self.media_urls[resolution] = line
 
     def extract_resolution(self, line):
-        # Extract resolution name from the line
+        """
+        Extracts the resolution name from a line of the M3U8 file.
+
+        Parameters:
+            line (str): A line from the M3U8 file.
+
+        Returns:
+            str: The resolution name (e.g., "1080p").
+        """
         if 'RESOLUTION=' in line:
             resolution = line.split('RESOLUTION=')[1].split(',')[0]
             return resolution
         return "Unknown"
 
     def ask_resolution_and_download(self):
-        # Display available resolutions and ask user for their choice
+        """
+        Prompts the user to select a resolution and then downloads and merges the video segments.
+        """
         if not self.media_urls:
             print("No media URLs found.")
             return
@@ -67,7 +105,12 @@ class M3U8Downloader:
             print("Resolution not found.")
 
     def merge_segments_and_convert(self, url):
-        # Download the media file from the selected URL
+        """
+        Downloads the media file from the selected URL, merges the segments, and converts them to MP4.
+
+        Parameters:
+            url (str): The URL of the selected media stream.
+        """
         response = requests.get(url)
         if response.status_code == 200:
             m3u8_content = response.text
@@ -79,47 +122,56 @@ class M3U8Downloader:
             print(f"Failed to download media .m3u8 file. Status code: {response.status_code}")
 
     def concatenate_segments(self, m3u8_content):
-        # Parse the segment URLs from the downloaded .m3u8 file
+        """
+        Merges video segments from the M3U8 playlist into a single temporary .ts file.
+
+        Parameters:
+            m3u8_content (str): The content of the media M3U8 file.
+        """
         lines = m3u8_content.splitlines()
         base_url = "https://embed-cloudfront.wistia.com"  # Base URL for segments
         temp_ts_file = "temp.ts"
 
+        # Get the segment URLs
+        segment_urls = [urljoin(base_url, line) for line in lines if line.startswith('/')]
+
+        # Download segments with a progress bar
         with open(temp_ts_file, 'wb') as outfile:
-            for line in lines:
-                if line.startswith('/'):
-                    # Full URL for the segment
-                    segment_url = urljoin(base_url, line)
-                    print(f"Downloading segment: {segment_url}")
-                    response = requests.get(segment_url, stream=True)
-                    if response.status_code == 200:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            outfile.write(chunk)
-                        print(f"Segment downloaded and appended.")
-                    else:
-                        print(f"Failed to download segment. Status code: {response.status_code}")
+            for segment_url in tqdm(segment_urls, desc="Downloading and merging segments", unit="segment"):
+                response = requests.get(segment_url, stream=True)
+                if response.status_code == 200:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        outfile.write(chunk)
+                else:
+                    print(f"Failed to download segment. Status code: {response.status_code}")
 
         print(f"All segments have been merged into {temp_ts_file}.")
         self.convert_to_mp4(temp_ts_file)
 
     def convert_to_mp4(self, ts_file):
-        # Convert the .ts file to .mp4 using moviepy
-        output_file = "output.mp4"
+        """
+        Converts the temporary .ts file to an MP4 file using moviepy and then deletes the temporary file.
+
+        Parameters:
+            ts_file (str): The name of the temporary .ts file.
+        """
         try:
+            # Use moviepy to convert the .ts file to .mp4
             video_clip = VideoFileClip(ts_file)
-            video_clip.write_videofile(output_file, codec='libx264')
-            print(f"Successfully converted {ts_file} to {output_file}.")
+            video_clip.write_videofile(self.output_mp4, codec='libx264')
+            print(f"Successfully converted {ts_file} to {self.output_mp4}.")
         except Exception as e:
             print(f"Failed to convert video. Error: {e}")
         finally:
+            # Explicitly close the video clip to ensure file is not in use
+            if 'video_clip' in locals():
+                video_clip.close()
+
             # Delete the temporary .ts file
             if os.path.exists(ts_file):
-                os.remove(ts_file)
-                print(f"Deleted temporary file {ts_file}.")
+                try:
+                    os.remove(ts_file)
+                    print(f"Deleted temporary file {ts_file}.")
+                except PermissionError as e:
+                    print(f"Failed to delete temporary file. Error: {e}")
 
-if __name__ == "__main__":
-    url = "https://fast.wistia.com/embed/medias/w9dz27s7pu.m3u8"
-    downloader = M3U8Downloader(url)
-    
-    downloader.download_m3u8()
-    downloader.parse_m3u8()
-    downloader.ask_resolution_and_download()
